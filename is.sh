@@ -16,63 +16,54 @@ mkdir -p "$LOG_DIR"
 > "$ERROR_LOG"
 
 echo "🔍 Начало проверки авторизации: $(date)"
+> auth_check.log
 
-# Функция проверки авторизации
-check_auth() {
-    local EMAIL="$1"
-    local HOST="$2"
-    local PASS="$3"
+while IFS=',' read -r SRC_EMAIL SRC_IMAP SRC_PASS DST_EMAIL DST_PASS DST_IMAP; do
+    # Убираем кавычки из полей
+    SRC_EMAIL=$(echo "$SRC_EMAIL" | tr -d '"')
+    SRC_IMAP=$(echo "$SRC_IMAP" | tr -d '"')
+    SRC_PASS=$(echo "$SRC_PASS" | tr -d '"')
+    DST_EMAIL=$(echo "$DST_EMAIL" | tr -d '"')
+    DST_PASS=$(echo "$DST_PASS" | tr -d '"')
+    DST_IMAP=$(echo "$DST_IMAP" | tr -d '"')
 
-    expect <<EOF >> "$AUTH_LOG"
-        log_user 0
-        spawn openssl s_client -connect ${HOST}:993 -quiet
-        expect "*OK*" {
-            send "a login ${EMAIL} \"${PASS}\"\r"
-        }
-        expect {
-            "*OK*" {
-                puts "✅ ${EMAIL} - ${HOST}: Авторизация успешна"
+    for SERVER in "$SRC_IMAP" "$DST_IMAP"; do
+        USER=$( [ "$SERVER" = "$SRC_IMAP" ] && echo "$SRC_EMAIL" || echo "$DST_EMAIL" )
+        PASS=$( [ "$SERVER" = "$SRC_IMAP" ] && echo "$SRC_PASS" || echo "$DST_PASS" )
+
+        expect -c "
+            log_user 0
+            spawn openssl s_client -crlf -connect $SERVER:993
+            expect \"*OK*\"
+            send \"a login $USER \\\"$PASS\\\"\r\"
+            expect {
+                \"OK\" {
+                    puts \"✅ $USER - $SERVER: Авторизация успешна\"
+                    puts \"✅ $USER - $SERVER: Авторизация успешна\" >> auth_check.log
+                }
+                \"NO\" {
+                    puts \"❌ $USER - $SERVER: Неверный логин или пароль\"
+                    puts \"❌ $USER - $SERVER: Неверный логин или пароль\" >> auth_check.log
+                }
+                timeout {
+                    puts \"❌ $USER - $SERVER: Таймаут подключения\"
+                    puts \"❌ $USER - $SERVER: Таймаут подключения\" >> auth_check.log
+                }
             }
-            "*NO*" {
-                puts "❌ ${EMAIL} - ${HOST}: Ошибка авторизации (неверный логин/пароль)"
-            }
-            timeout {
-                puts "❌ ${EMAIL} - ${HOST}: Таймаут при попытке подключения"
-            }
-            eof {
-                puts "❌ ${EMAIL} - ${HOST}: Соединение закрыто"
-            }
-        }
-        catch wait result
-        exit 0
-EOF
-}
+        "
+    done
+done < <(tail -n +2 accounts.txt)
 
-# Чтение и проверка аккаунтов
-mapfile -t ACCOUNTS < <(tail -n +2 "$ACCOUNTS_FILE")
-
-for LINE in "${ACCOUNTS[@]}"; do
-    IFS=',' read -r SRC_EMAIL SRC_IMAP SRC_PASS DST_EMAIL DST_PASS DST_IMAP <<< "$LINE"
-    # Убираем кавычки у пароля, если есть
-    SRC_PASS=$(echo "$SRC_PASS" | sed 's/^"\(.*\)"$/\1/')
-    DST_PASS=$(echo "$DST_PASS" | sed 's/^"\(.*\)"$/\1/')
-    check_auth "$SRC_EMAIL" "$SRC_IMAP" "$SRC_PASS" &
-    check_auth "$DST_EMAIL" "$DST_IMAP" "$DST_PASS" &
-done
-
-wait
+echo
 echo "📄 Результаты авторизации:"
-cat "$AUTH_LOG"
+cat auth_check.log
+echo
 
-if grep -q "❌" "$AUTH_LOG"; then
-    echo "⚠ Обнаружены ошибки авторизации!"
+read -rp "⏳ Продолжить перенос почты для успешно авторизованных ящиков? (y/n): " CONFIRM
+if [[ "$CONFIRM" != "y" ]]; then
+    echo "🚫 Перенос отменён."
+    exit 1
 fi
-
-# Подтверждение продолжения
-read -rp "Продолжить перенос почты? (y/n): " CONFIRM
-[[ "$CONFIRM" != "y" ]] && echo "⛔ Перенос отменён пользователем." && exit 0
-
-echo "🚀 Начало переноса: $(date)"
 
 # Функция переноса почты
 start_transfer() {
