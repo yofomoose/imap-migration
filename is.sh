@@ -2,136 +2,107 @@
 
 MAX_PARALLEL=5
 COUNTER=0
-AUTH_OK=()
-AUTH_FAIL=()
-
+LOG_DIR="./logs"
 ACCOUNTS_FILE="accounts.txt"
-LOG_DIR="logs"
+TEMP_AUTH_OK="auth_ok.tmp"
+TEMP_AUTH_FAIL="auth_fail.tmp"
+
 mkdir -p "$LOG_DIR"
+> "$TEMP_AUTH_OK"
+> "$TEMP_AUTH_FAIL"
 
-echo "🕒 Начало проверки логинов: $(date)"
-
-if ! command -v imapsync &> /dev/null; then
-    echo "❌ imapsync не установлен!"
-    exit 1
+echo "🛠 Проверка Docker..."
+if ! command -v docker &>/dev/null; then
+    echo "Docker не найден. Устанавливаю..."
+    apt update && apt install -y docker.io || { echo "❌ Не удалось установить Docker"; exit 1; }
 fi
 
-# 🔍 Проверка логинов
-while IFS=';' read -r SRC_EMAIL SRC_PASS SRC_IMAP DST_EMAIL DST_PASS DST_IMAP; do
-    SRC_EMAIL=$(echo "$SRC_EMAIL" | tr -d '"')
-    DST_EMAIL=$(echo "$DST_EMAIL" | tr -d '"')
-    SRC_PASS=$(echo "$SRC_PASS" | tr -d '"')
-    DST_PASS=$(echo "$DST_PASS" | tr -d '"')
-    SRC_IMAP=$(echo "$SRC_IMAP" | tr -d '"')
-    DST_IMAP=$(echo "$DST_IMAP" | tr -d '"')
+echo "🐳 Проверка образа imapsync..."
+if ! docker image inspect gilleslamiral/imapsync &>/dev/null; then
+    echo "Образ imapsync не найден. Загружаю..."
+    docker pull gilleslamiral/imapsync
+fi
 
-    LOG_FILE="$LOG_DIR/imapcheck_$(echo $SRC_EMAIL | tr '@.' '__').log"
-
-    echo "🔐 Проверка логина: $SRC_EMAIL -> $DST_EMAIL"
-
-    imapsync \
-        --host1 "$SRC_IMAP" --user1 "$SRC_EMAIL" --password1 "$SRC_PASS" --ssl1 --port1 993 \
-        --host2 "$DST_IMAP" --user2 "$DST_EMAIL" --password2 "$DST_PASS" --ssl2 --port2 993 \
-        --authmech1 LOGIN --authmech2 LOGIN \
-        --justlogin \
-        > "$LOG_FILE" 2>&1
-
-    if [ $? -eq 0 ]; then
-        AUTH_OK+=("$SRC_EMAIL")
-    else
-        AUTH_FAIL+=("$SRC_EMAIL")
-    fi
-
-done < "$ACCOUNTS_FILE"
-
-# 📋 Вывод результатов
-echo -e "\n✅ Успешная авторизация:"
-for email in "${AUTH_OK[@]}"; do
-    echo "   ✔️ $email"
-done
-
-echo -e "\n❌ Ошибка авторизации:"
-for email in "${AUTH_FAIL[@]}"; do
-    echo "   ⛔ $email"
-done
-
-# ❓ Подтверждение
-echo -e "\nПродолжить перенос только для успешно авторизованных аккаунтов? (y/n)"
-read -r CONFIRM
-if [[ "$CONFIRM" != "y" && "$CONFIRM" != "Y" ]]; then
-    echo "⛔ Перенос отменён пользователем."
+echo "📂 Проверка наличия файла $ACCOUNTS_FILE..."
+if [[ ! -f "$ACCOUNTS_FILE" ]]; then
+    echo "Файл $ACCOUNTS_FILE не найден. Создаю пустой шаблон."
+    echo '"src_email","src_imap","src_pass","dst_email","dst_pass","dst_imap"' > "$ACCOUNTS_FILE"
     exit 0
 fi
 
-# 💌 --- ПЕРЕНОС ПОЧТЫ --- 💌
-
-declare -A PIDS
-declare -A EMAILS
-ERROR_LOGS=()
-
-show_progress() {
-    local LOG_FILE="$1"
-    local EMAIL="$2"
-
-    while kill -0 "${PIDS[$EMAIL]}" 2>/dev/null; do
-        SIZE_MB=$(grep -Eo '[0-9]+ msg in [0-9]+\.[0-9]+ MiB' "$LOG_FILE" | tail -n1 | awk '{print $5}')
-        echo "📡 [$EMAIL] Перенесено: ${SIZE_MB:-0.0} MiB"
-        sleep 5
-    done
-}
-
-for SRC_EMAIL in "${AUTH_OK[@]}"; do
-    # Получаем данные из accounts.txt для этого ящика
-    LINE=$(grep "$SRC_EMAIL" "$ACCOUNTS_FILE")
-    IFS=';' read -r SRC_EMAIL SRC_PASS SRC_IMAP DST_EMAIL DST_PASS DST_IMAP <<< "$LINE"
-
+echo "🔐 Проверка авторизации..."
+while IFS=, read -r SRC_EMAIL SRC_IMAP SRC_PASS DST_EMAIL DST_PASS DST_IMAP; do
     SRC_EMAIL=$(echo "$SRC_EMAIL" | tr -d '"')
     DST_EMAIL=$(echo "$DST_EMAIL" | tr -d '"')
-    SRC_PASS=$(echo "$SRC_PASS" | tr -d '"')
-    DST_PASS=$(echo "$DST_PASS" | tr -d '"')
-    SRC_IMAP=$(echo "$SRC_IMAP" | tr -d '"')
-    DST_IMAP=$(echo "$DST_IMAP" | tr -d '"')
 
-    LOG_FILE="${LOG_DIR}/$(echo $SRC_EMAIL | tr '@.' '__').log"
+    docker run --rm gilleslamiral/imapsync \
+        --host1 "$SRC_IMAP" --user1 "$SRC_EMAIL" --password1 "$SRC_PASS" \
+        --host2 "$DST_IMAP" --user2 "$DST_EMAIL" --password2 "$DST_PASS" \
+        --justconnect --nosslcheck > /dev/null 2>&1
+
+    if [[ $? -eq 0 ]]; then
+        echo "✅ Авторизация успешна: $SRC_EMAIL"
+        echo "$SRC_EMAIL" >> "$TEMP_AUTH_OK"
+    else
+        echo "❌ Ошибка авторизации: $SRC_EMAIL"
+        echo "$SRC_EMAIL" >> "$TEMP_AUTH_FAIL"
+    fi
+done < <(tail -n +2 "$ACCOUNTS_FILE") # Пропускаем заголовок
+
+echo
+echo "📋 Успешные: $(wc -l < "$TEMP_AUTH_OK")"
+echo "🛑 Ошибки: $(wc -l < "$TEMP_AUTH_FAIL")"
+if [[ -s "$TEMP_AUTH_FAIL" ]]; then
+    echo "Вот список с ошибками:"
+    cat "$TEMP_AUTH_FAIL"
+fi
+
+read -p "⏭ Продолжить перенос? (y/n): " CONFIRM
+[[ "$CONFIRM" != "y" ]] && exit 0
+
+START_TIME=$(date +%s)
+echo "🕒 Начало: $(date)"
+
+function migrate_mailbox() {
+    local SRC_EMAIL=$1 SRC_IMAP=$2 SRC_PASS=$3
+    local DST_EMAIL=$4 DST_PASS=$5 DST_IMAP=$6
+
+    local LOG_FILE="$LOG_DIR/$(echo "$SRC_EMAIL" | tr '@' '_' | tr '.' '_').log"
 
     echo "🚀 Старт переноса: $SRC_EMAIL -> $DST_EMAIL"
 
-    (
-        imapsync \
-            --host1 "$SRC_IMAP" --user1 "$SRC_EMAIL" --password1 "$SRC_PASS" --ssl1 --port1 993 \
-            --host2 "$DST_IMAP" --user2 "$DST_EMAIL" --password2 "$DST_PASS" --ssl2 --port2 993 \
-            --authmech1 LOGIN --authmech2 LOGIN \
-            --automap --skipcrossduplicates --useuid \
-            --nofoldersizes --nolog \
-            > "$LOG_FILE" 2>&1
+    docker run --rm \
+        -v "$(pwd)/$LOG_DIR:/tmp/logs" \
+        gilleslamiral/imapsync \
+        --host1 "$SRC_IMAP" --user1 "$SRC_EMAIL" --password1 "$SRC_PASS" \
+        --host2 "$DST_IMAP" --user2 "$DST_EMAIL" --password2 "$DST_PASS" \
+        --automap --skipcrossduplicates --useuid --nofoldersizes \
+        --logfile "/tmp/logs/$(basename "$LOG_FILE")" \
+        --log --debugcontent > /dev/null &
 
-        if grep -q "AUTHENTICATIONFAILED" "$LOG_FILE"; then
-            ERROR_LOGS+=("$SRC_EMAIL")
+    echo "🔄 [$$] Перенос: $SRC_EMAIL -> $DST_EMAIL"
+}
+
+# Основной цикл переноса
+while IFS=, read -r SRC_EMAIL SRC_IMAP SRC_PASS DST_EMAIL DST_PASS DST_IMAP; do
+    SRC_EMAIL=$(echo "$SRC_EMAIL" | tr -d '"')
+    DST_EMAIL=$(echo "$DST_EMAIL" | tr -d '"')
+    SRC_IMAP=$(echo "$SRC_IMAP" | tr -d '"')
+    SRC_PASS=$(echo "$SRC_PASS" | tr -d '"')
+    DST_IMAP=$(echo "$DST_IMAP" | tr -d '"')
+    DST_PASS=$(echo "$DST_PASS" | tr -d '"')
+
+    if grep -q "$SRC_EMAIL" "$TEMP_AUTH_OK"; then
+        migrate_mailbox "$SRC_EMAIL" "$SRC_IMAP" "$SRC_PASS" "$DST_EMAIL" "$DST_PASS" "$DST_IMAP"
+        ((COUNTER++))
+        if (( COUNTER % MAX_PARALLEL == 0 )); then
+            wait
         fi
-    ) &
-
-    PID=$!
-    PIDS["$SRC_EMAIL"]=$PID
-    EMAILS["$SRC_EMAIL"]=$LOG_FILE
-
-    show_progress "$LOG_FILE" "$SRC_EMAIL" &
-
-    ((COUNTER++))
-    if (( COUNTER % MAX_PARALLEL == 0 )); then
-        wait
     fi
-done
+done < <(tail -n +2 "$ACCOUNTS_FILE")
 
 wait
 
-# 🧾 Итог
-echo -e "\n✅ Перенос завершен: $(date)"
-
-if [ ${#ERROR_LOGS[@]} -gt 0 ]; then
-    echo -e "\n🚫 Ошибки авторизации во время переноса:"
-    for EMAIL in "${ERROR_LOGS[@]}"; do
-        echo "   ⛔ $EMAIL"
-    done
-else
-    echo -e "\n🎉 Перенос выполнен без ошибок авторизации!"
-fi
+END_TIME=$(date +%s)
+DURATION=$((END_TIME - START_TIME))
+echo "✅ Перенос завершён для всех ящиков. Время: $DURATION сек (~$((DURATION / 60)) мин)"
