@@ -47,7 +47,7 @@ while IFS=, read -r SRC_EMAIL SRC_IMAP SRC_PASS DST_EMAIL DST_PASS DST_IMAP; do
         echo "❌ Ошибка авторизации: $SRC_EMAIL"
         echo "$SRC_EMAIL" >> "$TEMP_AUTH_FAIL"
     fi
-done < <(tail -n +2 "$ACCOUNTS_FILE") # Пропускаем заголовок
+done < <(tail -n +2 "$ACCOUNTS_FILE")
 
 echo
 echo "📋 Успешные: $(wc -l < "$TEMP_AUTH_OK")"
@@ -79,11 +79,8 @@ function migrate_mailbox() {
         --automap --skipcrossduplicates --useuid --nofoldersizes \
         --logfile "/tmp/logs/$(basename "$LOG_FILE")" \
         --log --debugcontent > /dev/null &
-
-    echo "🔄 [$$] Перенос: $SRC_EMAIL -> $DST_EMAIL"
 }
 
-# Основной цикл переноса
 while IFS=, read -r SRC_EMAIL SRC_IMAP SRC_PASS DST_EMAIL DST_PASS DST_IMAP; do
     SRC_EMAIL=$(echo "$SRC_EMAIL" | tr -d '"')
     DST_EMAIL=$(echo "$DST_EMAIL" | tr -d '"')
