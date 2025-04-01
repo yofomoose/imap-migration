@@ -1,0 +1,9 @@
+mityasova@c-west.ru,imap.mail.ru,dKpBzfp4C5xYaMnhJwy7,mityasova@c-west.ru,"eRolLa,&,67",mail.c-west.ru
+merkulov@c-west.ru,imap.mail.ru,FkeaP1hXScQizySEHYhh,merkulov@c-west.ru,"96,TTImen,:",mail.c-west.ru
+sayfulina@c-west.ru,imap.mail.ru,5K9T2rhg76NWyJQSpedH,sayfulina@c-west.ru,"97,:,ockYLl",mail.c-west.ru
+s.gavr@c-west.ru,imap.mail.ru,gQXATUQnPjsepchgUdmp,s.gavr@c-west.ru,"77,#,uIrwiT",mail.c-west.ru
+balanyuk@c-west.ru,imap.mail.ru,Yb1g6D4AqtUgqBNvncmd,balanyuk@c-west.ru,"irChos,10,&",mail.c-west.ru
+a.vasenin@c-west.ru,imap.mail.ru,xad9hBPAeqcSrh3sc7BX,a.vasenin@c-west.ru,"Ompori,47,=",mail.c-west.ru
+210@c-west.ru,imap.mail.ru,nyhYCYB4tdL0FiV9GmLw,210@c-west.ru,YRpeOdlT*i32,mail.c-west.ru
+504@c-west.ru,imap.mail.ru,7EJJ52Ad6cw2tcVHdNns,504@c-west.ru,"lemIcH,29,}",mail.c-west.ru
+director@c-west.ru,imap.mail.ru,BwPyacvp7AAkEsfPJCyd,director@c-west.ru,"GASkeURe,#,37",mail.c-west.ru
