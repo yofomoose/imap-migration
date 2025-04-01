@@ -19,27 +19,27 @@ authorize_account() {
 
     expect <<EOF >> "$AUTH_LOG"
         set timeout 5
-        spawn openssl s_client -crlf -quiet -connect ${server}:993
+        spawn openssl s_client -crlf -quiet -connect $server:993
         expect {
             "*OK*" {
-                send "a login ${login} \"${pass}\"\r"
+                send "a login $login \"$pass\"\r"
                 expect {
                     "*OK*" {
-                        puts "✅ ${login} - ${server}: Авторизация успешна"
+                        puts "✅ $login - $server: Авторизация успешна"
                         exit 0
                     }
                     "*NO*" {
-                        puts "❌ ${login} - ${server}: Ошибка авторизации"
+                        puts "❌ $login - $server: Ошибка авторизации"
                         exit 1
                     }
                     timeout {
-                        puts "❌ ${login} - ${server}: Таймаут при авторизации"
+                        puts "❌ $login - $server: Таймаут при авторизации"
                         exit 2
                     }
                 }
             }
             timeout {
-                puts "❌ ${login} - ${server}: Сервер не отвечает"
+                puts "❌ $login - $server: Сервер не отвечает"
                 exit 3
             }
         }
