@@ -1,124 +1,97 @@
 #!/bin/bash
 
-# Количество параллельных потоков
+set -e
+
 MAX_PARALLEL=5
-LOG_DIR="logs"
-CSV_FILE="accounts.txt"
-AUTH_CHECK_LOG="auth_check.log"
-TRANSFERRED_LOG="transferred.log"
-DOCKER_IMAGE="gilleslamiral/imapsync"
+COUNTER=0
 
-mkdir -p "$LOG_DIR"
-> "$AUTH_CHECK_LOG"
-> "$TRANSFERRED_LOG"
+ACCOUNTS_FILE="accounts.csv"
+LOGS_DIR="logs"
+AUTH_LOG="auth_check.log"
 
-echo "🔍 Начало проверки авторизации: $(date -u)"
+mkdir -p "$LOGS_DIR"
+> "$AUTH_LOG"
 
-# Проверка наличия Docker
-if ! command -v docker &> /dev/null; then
-    echo "Docker не установлен. Устанавливаю..."
-    apt update && apt install -y docker.io
-fi
+START_TIME=$(date)
 
-# Проверка наличия образа imapsync
-if ! docker image ls | grep -q "$DOCKER_IMAGE"; then
-    echo "Образ imapsync не найден. Загружаю..."
-    docker pull $DOCKER_IMAGE
-fi
+echo "🔍 Начало проверки авторизации: $START_TIME"
 
-# Функция проверки авторизации
-check_auth() {
-    local email="$1"
-    local server="$2"
-    local pass="$3"
+# Авторизация
+while IFS=',' read -r SRC_EMAIL SRC_IMAP SRC_PASS DST_EMAIL DST_PASS DST_IMAP; do
+    SRC_PASS=$(echo "$SRC_PASS" | sed 's/^"//;s/"$//')
+    DST_PASS=$(echo "$DST_PASS" | sed 's/^"//;s/"$//')
 
-    expect -c "
-        log_user 0
-        spawn openssl s_client -crlf -connect $server:993
-        expect \"OK\"
-        send \"a login $email \\\"$pass\\\"\r\"
+    for side in src dst; do
+        if [ "$side" == "src" ]; then
+            EMAIL="$SRC_EMAIL"
+            IMAP="$SRC_IMAP"
+            PASS="$SRC_PASS"
+        else
+            EMAIL="$DST_EMAIL"
+            IMAP="$DST_IMAP"
+            PASS="$DST_PASS"
+        fi
+
+        expect <<EOF > /dev/null 2>&1
+        set timeout 10
+        spawn openssl s_client -crlf -quiet -connect $IMAP:993
+        expect "*OK*"
+        send "a login $EMAIL \"$PASS\"
+"
         expect {
-            \"OK\" {
-                puts \"✅ $email - $server: Авторизация успешна\" >> $AUTH_CHECK_LOG
-                exit 0
+            "OK" {
+                puts "✅ $EMAIL - $IMAP: Авторизация успешна"
+                puts "✅ $EMAIL - $IMAP: Авторизация успешна" >> "$AUTH_LOG"
             }
-            \"NO\" {
-                puts \"❌ $email - $server: Ошибка авторизации (неверный логин/пароль)\" >> $AUTH_CHECK_LOG
-                exit 1
+            "NO" {
+                puts "❌ $EMAIL - $IMAP: Ошибка авторизации (неверный логин/пароль)"
+                puts "❌ $EMAIL - $IMAP: Ошибка авторизации (неверный логин/пароль)" >> "$AUTH_LOG"
             }
             timeout {
-                puts \"⏱ $email - $server: Таймаут подключения\" >> $AUTH_CHECK_LOG
-                exit 2
+                puts "❌ $EMAIL - $IMAP: Ошибка авторизации (таймаут)"
+                puts "❌ $EMAIL - $IMAP: Ошибка авторизации (таймаут)" >> "$AUTH_LOG"
             }
         }
-    "
-}
+        EOF
 
-# Чтение CSV и проверка авторизации
-mapfile -t valid_accounts < <(
-    while IFS=, read -r src_email src_imap src_pass dst_email dst_pass dst_imap; do
-        src_pass=${src_pass//\"/}
-        dst_pass=${dst_pass//\"/}
-        if check_auth "$src_email" "$src_imap" "$src_pass" && check_auth "$dst_email" "$dst_imap" "$dst_pass"; then
-            echo "$src_email,$src_imap,$src_pass,$dst_email,$dst_pass,$dst_imap"
-        fi
-    done < <(tail -n +1 "$CSV_FILE" | sed 's/\r//' | sed 's/^"//;s/"$//' | sed 's/","/,/g')
-)
+    done
+done < <(tail -n +1 "$ACCOUNTS_FILE")
 
-echo
+echo ""
 echo "📄 Результаты авторизации:"
-cat "$AUTH_CHECK_LOG"
+cat "$AUTH_LOG"
 
-# Проверка наличия неавторизованных
-if grep -q "❌" "$AUTH_CHECK_LOG" || grep -q "⏱" "$AUTH_CHECK_LOG"; then
-    echo
-    read -p "❗ Продолжить перенос для прошедших авторизацию? [y/N]: " confirm
-    [[ "$confirm" =~ ^[Yy]$ ]] || exit 1
+# Запрос подтверждения
+read -p "Продолжить перенос? (y/n): " CONFIRM
+if [[ "$CONFIRM" != "y" ]]; then
+    echo "⛔ Перенос отменён пользователем."
+    exit 0
 fi
 
-echo "🚀 Начало переноса: $(date -u)"
-START_TIME=$(date +%s)
+echo "🚀 Начало переноса: $(date)"
 
-COUNTER=0
-PIDS=()
+# Запуск переноса
+while IFS=',' read -r SRC_EMAIL SRC_IMAP SRC_PASS DST_EMAIL DST_PASS DST_IMAP; do
+    SRC_PASS=$(echo "$SRC_PASS" | sed 's/^"//;s/"$//')
+    DST_PASS=$(echo "$DST_PASS" | sed 's/^"//;s/"$//')
 
-for line in "${valid_accounts[@]}"; do
-    IFS=, read -r src_email src_imap src_pass dst_email dst_pass dst_imap <<< "$line"
+    LOG_FILE="$LOGS_DIR/$(echo "$SRC_EMAIL" | tr '@' '_' | tr '.' '_').log"
+    echo "🚀 Старт переноса: $SRC_EMAIL -> $DST_EMAIL"
 
-    log_file="$LOG_DIR/$(echo "$src_email" | tr '@.' '_').log"
-    echo "🚀 Старт переноса: $src_email -> $dst_email (PID будет создан)"
-
-    docker run --rm \
-        -v "$(pwd):/data" \
-        --user "$(id -u):$(id -g)" \
-        "$DOCKER_IMAGE" \
-        imapsync \
-        --host1 "$src_imap" --user1 "$src_email" --password1 "$src_pass" --ssl1 --port1 993 --authmech1 LOGIN \
-        --host2 "$dst_imap" --user2 "$dst_email" --password2 "$dst_pass" --ssl2 --port2 993 --authmech2 LOGIN \
+    docker run --rm -v "$(pwd):/data" gilleslamiral/imapsync imapsync \
+        --host1 "$SRC_IMAP" --user1 "$SRC_EMAIL" --password1 "$SRC_PASS" --ssl1 \
+        --host2 "$DST_IMAP" --user2 "$DST_EMAIL" --password2 "$DST_PASS" --ssl2 \
         --automap --skipcrossduplicates --useuid --nofoldersizes \
-        --log /data/"$log_file" &
-    
-    pid=$!
-    PIDS+=($pid)
+        --logfile "/data/$LOG_FILE" &
+
     ((COUNTER++))
-
     if (( COUNTER % MAX_PARALLEL == 0 )); then
-        wait "${PIDS[@]}"
-        PIDS=()
+        wait
     fi
-done
+done < <(tail -n +1 "$ACCOUNTS_FILE")
 
-# Ждем оставшиеся
-wait "${PIDS[@]}"
+wait
 
-END_TIME=$(date +%s)
-DURATION=$((END_TIME - START_TIME))
-
-echo
-echo "✅ Перенос завершён. Общее время: $DURATION секунд (~$((DURATION / 60)) минут)"
-echo "📂 Логи в папке: $LOG_DIR"
-echo
-
-# Вывод статистики
-echo "📊 Объём переданных данных:"
-grep "Transferred:" "$LOG_DIR"/*.log | awk -F ':' '{print $2}' | paste -sd+ - | bc | awk '{printf "%.2f MB\n", $1/1024}'
+END_TIME=$(date)
+echo "✅ Перенос завершён. Время: $START_TIME — $END_TIME"
+echo "📂 Логи в папке: $LOGS_DIR"
