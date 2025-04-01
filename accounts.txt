@@ -1,5 +1,4 @@
 "src_email","src_imap","src_pass","dst_email","dst_pass","dst_imap"
-
 mityasova@c-west.ru,imap.mail.ru,dKpBzfp4C5xYaMnhJwy7,mityasova@c-west.ru,"eRolLa,&,67",mail.c-west.ru
 merkulov@c-west.ru,imap.mail.ru,FkeaP1hXScQizySEHYhh,merkulov@c-west.ru,"96,TTImen,:",mail.c-west.ru
 sayfulina@c-west.ru,imap.mail.ru,5K9T2rhg76NWyJQSpedH,sayfulina@c-west.ru,"97,:,ockYLl",mail.c-west.ru
