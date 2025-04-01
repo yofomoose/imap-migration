@@ -1,97 +1,117 @@
 #!/bin/bash
 
-set -e
-
+# Максимальное количество параллельных процессов
 MAX_PARALLEL=5
 COUNTER=0
 
-ACCOUNTS_FILE="accounts.csv"
-LOGS_DIR="logs"
+ACCOUNTS_FILE="accounts.txt"
+LOG_DIR="logs"
 AUTH_LOG="auth_check.log"
+TRANSFER_LOG="transfer_progress.log"
+ERROR_LOG="errors.log"
 
-mkdir -p "$LOGS_DIR"
+mkdir -p "$LOG_DIR"
 > "$AUTH_LOG"
+> "$TRANSFER_LOG"
+> "$ERROR_LOG"
 
-START_TIME=$(date)
+echo "🔍 Начало проверки авторизации: $(date)"
 
-echo "🔍 Начало проверки авторизации: $START_TIME"
+# Функция проверки авторизации
+check_auth() {
+    local EMAIL="$1"
+    local HOST="$2"
+    local PASS="$3"
 
-# Авторизация
-while IFS=',' read -r SRC_EMAIL SRC_IMAP SRC_PASS DST_EMAIL DST_PASS DST_IMAP; do
-    SRC_PASS=$(echo "$SRC_PASS" | sed 's/^"//;s/"$//')
-    DST_PASS=$(echo "$DST_PASS" | sed 's/^"//;s/"$//')
-
-    for side in src dst; do
-        if [ "$side" == "src" ]; then
-            EMAIL="$SRC_EMAIL"
-            IMAP="$SRC_IMAP"
-            PASS="$SRC_PASS"
-        else
-            EMAIL="$DST_EMAIL"
-            IMAP="$DST_IMAP"
-            PASS="$DST_PASS"
-        fi
-
-        expect <<EOF > /dev/null 2>&1
-        set timeout 10
-        spawn openssl s_client -crlf -quiet -connect $IMAP:993
-        expect "*OK*"
-        send "a login $EMAIL \"$PASS\"
-"
+    expect <<EOF >> "$AUTH_LOG"
+        log_user 0
+        spawn openssl s_client -connect ${HOST}:993 -quiet
+        expect "*OK*" {
+            send "a login ${EMAIL} \"${PASS}\"\r"
+        }
         expect {
-            "OK" {
-                puts "✅ $EMAIL - $IMAP: Авторизация успешна"
-                puts "✅ $EMAIL - $IMAP: Авторизация успешна" >> "$AUTH_LOG"
+            "*OK*" {
+                puts "✅ ${EMAIL} - ${HOST}: Авторизация успешна"
             }
-            "NO" {
-                puts "❌ $EMAIL - $IMAP: Ошибка авторизации (неверный логин/пароль)"
-                puts "❌ $EMAIL - $IMAP: Ошибка авторизации (неверный логин/пароль)" >> "$AUTH_LOG"
+            "*NO*" {
+                puts "❌ ${EMAIL} - ${HOST}: Ошибка авторизации (неверный логин/пароль)"
             }
             timeout {
-                puts "❌ $EMAIL - $IMAP: Ошибка авторизации (таймаут)"
-                puts "❌ $EMAIL - $IMAP: Ошибка авторизации (таймаут)" >> "$AUTH_LOG"
+                puts "❌ ${EMAIL} - ${HOST}: Таймаут при попытке подключения"
+            }
+            eof {
+                puts "❌ ${EMAIL} - ${HOST}: Соединение закрыто"
             }
         }
-        EOF
+        catch wait result
+        exit 0
+EOF
+}
 
-    done
-done < <(tail -n +1 "$ACCOUNTS_FILE")
+# Чтение и проверка аккаунтов
+mapfile -t ACCOUNTS < <(tail -n +2 "$ACCOUNTS_FILE")
 
-echo ""
+for LINE in "${ACCOUNTS[@]}"; do
+    IFS=',' read -r SRC_EMAIL SRC_IMAP SRC_PASS DST_EMAIL DST_PASS DST_IMAP <<< "$LINE"
+    # Убираем кавычки у пароля, если есть
+    SRC_PASS=$(echo "$SRC_PASS" | sed 's/^"\(.*\)"$/\1/')
+    DST_PASS=$(echo "$DST_PASS" | sed 's/^"\(.*\)"$/\1/')
+    check_auth "$SRC_EMAIL" "$SRC_IMAP" "$SRC_PASS" &
+    check_auth "$DST_EMAIL" "$DST_IMAP" "$DST_PASS" &
+done
+
+wait
 echo "📄 Результаты авторизации:"
 cat "$AUTH_LOG"
 
-# Запрос подтверждения
-read -p "Продолжить перенос? (y/n): " CONFIRM
-if [[ "$CONFIRM" != "y" ]]; then
-    echo "⛔ Перенос отменён пользователем."
-    exit 0
+if grep -q "❌" "$AUTH_LOG"; then
+    echo "⚠ Обнаружены ошибки авторизации!"
 fi
+
+# Подтверждение продолжения
+read -rp "Продолжить перенос почты? (y/n): " CONFIRM
+[[ "$CONFIRM" != "y" ]] && echo "⛔ Перенос отменён пользователем." && exit 0
 
 echo "🚀 Начало переноса: $(date)"
 
-# Запуск переноса
-while IFS=',' read -r SRC_EMAIL SRC_IMAP SRC_PASS DST_EMAIL DST_PASS DST_IMAP; do
-    SRC_PASS=$(echo "$SRC_PASS" | sed 's/^"//;s/"$//')
-    DST_PASS=$(echo "$DST_PASS" | sed 's/^"//;s/"$//')
+# Функция переноса почты
+start_transfer() {
+    local SRC_EMAIL="$1"
+    local SRC_IMAP="$2"
+    local SRC_PASS="$3"
+    local DST_EMAIL="$4"
+    local DST_PASS="$5"
+    local DST_IMAP="$6"
+    local LOG_FILE="$LOG_DIR/$(echo $SRC_EMAIL | tr '@.' '__').log"
 
-    LOG_FILE="$LOGS_DIR/$(echo "$SRC_EMAIL" | tr '@' '_' | tr '.' '_').log"
     echo "🚀 Старт переноса: $SRC_EMAIL -> $DST_EMAIL"
 
-    docker run --rm -v "$(pwd):/data" gilleslamiral/imapsync imapsync \
+    imapsync \
         --host1 "$SRC_IMAP" --user1 "$SRC_EMAIL" --password1 "$SRC_PASS" --ssl1 \
         --host2 "$DST_IMAP" --user2 "$DST_EMAIL" --password2 "$DST_PASS" --ssl2 \
         --automap --skipcrossduplicates --useuid --nofoldersizes \
-        --logfile "/data/$LOG_FILE" &
+        --logfile "$LOG_FILE" \
+        > "$LOG_FILE" 2>&1 &
+
+    echo "$!" >> "$LOG_DIR/pids"
+}
+
+> "$LOG_DIR/pids"
+
+for LINE in "${ACCOUNTS[@]}"; do
+    IFS=',' read -r SRC_EMAIL SRC_IMAP SRC_PASS DST_EMAIL DST_PASS DST_IMAP <<< "$LINE"
+    SRC_PASS=$(echo "$SRC_PASS" | sed 's/^"\(.*\)"$/\1/')
+    DST_PASS=$(echo "$DST_PASS" | sed 's/^"\(.*\)"$/\1/')
+
+    start_transfer "$SRC_EMAIL" "$SRC_IMAP" "$SRC_PASS" "$DST_EMAIL" "$DST_PASS" "$DST_IMAP"
 
     ((COUNTER++))
     if (( COUNTER % MAX_PARALLEL == 0 )); then
         wait
     fi
-done < <(tail -n +1 "$ACCOUNTS_FILE")
+done
 
 wait
 
-END_TIME=$(date)
-echo "✅ Перенос завершён. Время: $START_TIME — $END_TIME"
-echo "📂 Логи в папке: $LOGS_DIR"
+echo "✅ Перенос завершён. Общее время: $(date)"
+echo "📂 Логи в папке: $LOG_DIR"
